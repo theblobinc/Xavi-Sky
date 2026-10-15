@@ -13,6 +13,7 @@ export const NODE_ID = (process.env.XAVI_SKY_NODE_ID || os.hostname() || 'xavi-s
 export const NODE_KIND = (process.env.XAVI_SKY_NODE_KIND || (process.env.GITHUB_ACTIONS ? 'github-actions' : 'server')).trim();
 export const FEDERATION_TOKEN = (process.env.XAVI_SKY_FEDERATION_TOKEN || '').trim();
 export const FEDERATION_TOKEN_FILE = process.env.XAVI_SKY_FEDERATION_TOKEN_FILE || `${ROOT}secrets/federation.token`;
+export const AWS_FEDERATION_PUBLIC_KEY_FILE = process.env.XAVI_SKY_AWS_FEDERATION_PUBLIC_KEY_FILE || `${ROOT}secrets/aws-federation-public.pem`;
 export const PEERS = (process.env.XAVI_SKY_PEERS || '').split('|').map(s => s.trim()).filter(Boolean);
 export const SERVER_PORT = num('XAVI_SKY_SERVER_PORT', 8787, 1, 65535);
 export const SERVER_HOST = process.env.XAVI_SKY_SERVER_HOST || '127.0.0.1';
