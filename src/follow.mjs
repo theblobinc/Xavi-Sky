@@ -22,7 +22,7 @@ async function xrpc(base, method, name, body, token='') {
       accept: 'application/json',
       ...(body ? {'content-type':'application/json'} : {}),
       ...(token ? {authorization:`Bearer ${token}`} : {}),
-      'user-agent':'Xavi-Sky/0.3',
+      'user-agent':'Xavi-Sky/0.4',
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -45,7 +45,7 @@ async function graphList(endpoint, actor, max=20000) {
     const u=new URL(`${PUBLIC_API}/xrpc/${endpoint}`);
     u.searchParams.set('actor',actor); u.searchParams.set('limit','100');
     if(cursor) u.searchParams.set('cursor',cursor);
-    const r=await fetch(u,{headers:{accept:'application/json','user-agent':'Xavi-Sky/0.3'}});
+    const r=await fetch(u,{headers:{accept:'application/json','user-agent':'Xavi-Sky/0.4'}});
     if(!r.ok) throw new Error(`${endpoint} HTTP ${r.status}`);
     const j=await r.json();
     const rows = endpoint.endsWith('getFollowers') ? (j.followers||[]) : (j.follows||[]);
@@ -65,9 +65,14 @@ function actionCount(accountHandle, sinceIso) {
       AND payload_json LIKE '%"state":"followed"%'`).get(accountHandle,sinceIso)?.n||0);
   }
 }
-function candidates(limit=10000) {
-  return openDb().prepare(`SELECT did,handle,score,last_seen_at
-    FROM candidates WHERE did<>'' ORDER BY score DESC,last_seen_at DESC LIMIT ?`).all(limit);
+function candidates(accountHandle, limit=10000) {
+  return openDb().prepare(`SELECT c.did,c.handle,c.score,c.last_seen_at
+    FROM candidates c
+    WHERE c.did<>'' AND NOT EXISTS (
+      SELECT 1 FROM account_state s
+      WHERE s.account_handle=? AND s.did=c.did AND s.state IN ('followed','unavailable')
+    )
+    ORDER BY c.score DESC,c.last_seen_at DESC LIMIT ?`).all(accountHandle,limit);
 }
 async function followOne(session, accountHandle, did, reason) {
   const record={$type:'app.bsky.graph.follow',subject:did,createdAt:new Date().toISOString()};
@@ -80,7 +85,7 @@ export async function runFollowCycle() {
   const accounts=await loadAccounts();
   const results=[];
   for(const account of accounts) {
-    const r={handle:account.handle,ok:false,followbacks:0,discovery:0,attempted:0,errors:[]};
+    const r={handle:account.handle,ok:false,followbacks:0,discovery:0,attempted:0,unavailable:0,errors:[]};
     try {
       const session=await createSession(account);
       const [following,followers]=await Promise.all([
@@ -92,12 +97,12 @@ export async function runFollowCycle() {
       const oneHourAgo=new Date(Date.now()-3600_000).toISOString();
       const dayAgo=new Date(Date.now()-86400_000).toISOString();
       const usedHour=actionCount(account.handle,oneHourAgo), usedDay=actionCount(account.handle,dayAgo);
-      let budget=Math.max(0,Math.min(PER_RUN-usedHour,DAILY_MAX-usedDay));
+      const budget=Math.max(0,Math.min(PER_RUN-usedHour,DAILY_MAX-usedDay));
       const queue=[];
       for(const f of followers) if(f?.did && !followed.has(f.did)) queue.push({did:f.did,reason:'followback'});
       const queued=new Set(queue.map(x=>x.did));
       if(queue.length<budget) {
-        for(const c of candidates(Math.max(2000,budget*8))) {
+        for(const c of candidates(account.handle,Math.max(2000,budget*8))) {
           if(queue.length>=budget) break;
           if(!c?.did || followed.has(c.did) || queued.has(c.did) || c.did===session.did) continue;
           queue.push({did:c.did,reason:'discovery'}); queued.add(c.did);
@@ -110,7 +115,13 @@ export async function runFollowCycle() {
           followed.add(q.did);
           if(q.reason==='followback') r.followbacks++; else r.discovery++;
         } catch(e) {
-          r.errors.push({did:q.did,error:String(e?.message||e).slice(0,240)});
+          const msg=String(e?.message||e);
+          if(e?.status===401 && /taken down/i.test(msg)) {
+            markAccountState(account.handle,q.did,'unavailable','account taken down');
+            r.unavailable++;
+          } else {
+            r.errors.push({did:q.did,error:msg.slice(0,240)});
+          }
           if(e?.status===429) break;
         }
         await sleep(WRITE_DELAY_MS);
