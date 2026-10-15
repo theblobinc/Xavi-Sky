@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+
+# User-generated pack output (contains profile data of real people).
+# Never commit these — each user owns their own curations.
+packs/*
+!packs/.gitkeep
+
+.bsky-cache/

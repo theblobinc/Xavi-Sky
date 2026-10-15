@@ -1,0 +1,6 @@
+{
+  "accounts": [
+    {"handle": "account-one.example", "appPassword": "xxxx-xxxx-xxxx-xxxx", "service": "https://bsky.social"},
+    {"handle": "account-two.example", "appPassword": "xxxx-xxxx-xxxx-xxxx", "service": "https://bsky.social"}
+  ]
+}

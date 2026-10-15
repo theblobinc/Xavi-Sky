@@ -1,0 +1,5 @@
+.git
+.github
+data
+secrets
+node_modules

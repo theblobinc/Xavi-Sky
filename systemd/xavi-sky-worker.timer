@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Xavi-Sky hourly
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Persistent=true
+RandomizedDelaySec=30
+Unit=xavi-sky-worker.service
+
+[Install]
+WantedBy=timers.target

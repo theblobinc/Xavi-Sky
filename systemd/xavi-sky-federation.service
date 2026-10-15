@@ -1,0 +1,19 @@
+[Unit]
+Description=Xavi-Sky generic federation API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/datastore3/xavi-sky
+Environment=XAVI_SKY_NODE_ID=xavi-sky-prod4
+Environment=XAVI_SKY_NODE_KIND=server
+Environment=XAVI_SKY_DATA_DIR=/datastore3/xavi-sky/data
+Environment=XAVI_SKY_FEDERATION_TOKEN_FILE=/datastore3/xavi-sky/secrets/federation.token
+Environment=XAVI_SKY_SERVER_HOST=127.0.0.1
+Environment=XAVI_SKY_SERVER_PORT=8787
+ExecStart=/usr/bin/node /datastore3/xavi-sky/src/server.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

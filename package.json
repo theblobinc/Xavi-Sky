@@ -1,0 +1,16 @@
+{
+  "name": "xavi-sky",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Federated Bluesky starter-pack discovery, ranking, dedupe and observability worker.",
+  "scripts": {
+    "run": "node src/worker.mjs",
+    "serve": "node src/server.mjs",
+    "discover": "node -e \"import('./src/discover.mjs').then(m=>m.discoverAndRank())\"",
+    "test": "node --test test/*.test.mjs",
+    "test:syntax": "for f in src/*.mjs; do node --check $f; done"
+  },
+  "engines": {"node": ">=22"},
+  "license": "MIT"
+}

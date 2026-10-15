@@ -1,0 +1,37 @@
+/**
+ * Central config + defaults. Most can be overridden via CLI flags.
+ */
+
+export const PUBLIC_API = 'https://public.api.bsky.app';
+
+export const BSKY_MAX_PACK_MEMBERS = 150;
+export const BSKY_MAX_PACK_NAME_CHARS = 50;
+export const BSKY_MAX_PACK_DESC_CHARS = 300;
+
+export const DEFAULTS = {
+  limit: 150,
+  activityDays: 30,         // drop members with no posts in last N days
+  searchPageLimit: 100,     // searchActors page size
+  searchPagesPerQuery: 5,   // max pages per query (protects against pagination loops)
+  profileBatchSize: 25,     // getProfiles cap
+  activityConcurrency: 8,   // concurrent getAuthorFeed calls
+  networkConcurrency: 5,    // concurrent follow checks
+  rateLimitDelayMs: 80,     // between calls in serial batches
+  saturationScrapeLimit: 20, // how many existing packs to surface per theme
+};
+
+export const SCORING_WEIGHTS = {
+  followers: 1.0,           // log-scaled follower count
+  activity: 0.6,            // recent post cadence
+  engagement: 0.4,          // likes-per-post proxy
+  network: 0.8,             // boost if in your social graph
+  reshareLikelihood: 0.5,   // smaller, niche-matched accounts amplify harder
+  inverseSaturation: 0.3,   // boost for under-represented in existing packs
+};
+
+// Domains that signal substack/newsletter writers via handle suffix
+export const NEWSLETTER_HANDLE_SUFFIXES = [
+  '.substack.com',
+  '.beehiiv.com',
+  '.ghost.io',
+];

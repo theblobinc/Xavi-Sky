@@ -1,0 +1,111 @@
+name: Xavi-Sky Hourly Worker
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: xavi-sky-hourly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      XAVI_SKY_NODE_ID: github-${{ github.repository_owner }}-xavi-sky
+      XAVI_SKY_NODE_KIND: github-actions
+      XAVI_SKY_DATA_DIR: ${{ github.workspace }}/data
+      XAVI_SKY_PEERS: https://www.xavi.app
+      XAVI_SKY_FEDERATION_TOKEN: ${{ secrets.XAVI_SKY_FEDERATION_TOKEN }}
+      RUN_DEADLINE_MS: '240000'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Require federation/state key
+        run: |
+          test -n "$XAVI_SKY_FEDERATION_TOKEN" || {
+            echo 'XAVI_SKY_FEDERATION_TOKEN repository secret is required.' >&2
+            exit 1
+          }
+
+      - name: Restore durable GitHub replica
+        run: |
+          set -euo pipefail
+          STATE="$RUNNER_TEMP/xavi-sky-state.enc"
+          mkdir -p "$XAVI_SKY_DATA_DIR"
+          if git fetch --no-tags origin refs/heads/xavi-sky-state:refs/remotes/origin/xavi-sky-state 2>/dev/null; then
+            if git show origin/xavi-sky-state:github-replica.sqlite.enc > "$STATE" 2>/dev/null; then
+              node src/github-state.mjs restore "$STATE"
+            else
+              echo 'State branch exists but has no snapshot; starting a fresh replica.'
+            fi
+          else
+            echo 'No durable state branch yet; starting a fresh replica.'
+          fi
+
+      - name: Run worker
+        run: node src/worker.mjs
+
+      - name: Encrypt durable replica snapshot
+        if: ${{ always() && env.XAVI_SKY_FEDERATION_TOKEN != '' }}
+        run: node src/github-state.mjs snapshot "$RUNNER_TEMP/xavi-sky-state.enc"
+
+      - name: Persist durable replica to Git
+        if: ${{ always() && env.XAVI_SKY_FEDERATION_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          STATE="$RUNNER_TEMP/xavi-sky-state.enc"
+          test -s "$STATE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          WORKTREE="$RUNNER_TEMP/xavi-sky-state-branch"
+          rm -rf "$WORKTREE"
+          git worktree add --detach "$WORKTREE" HEAD
+          cd "$WORKTREE"
+          git checkout --orphan xavi-sky-state-build
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "$STATE" github-replica.sqlite.enc
+          printf '%s\n' \
+            '# Xavi-Sky durable GitHub replica' \
+            '' \
+            'This branch stores the encrypted SQLite snapshot used by the GitHub Actions replica.' \
+            'It is intentionally independent of the on-premises Xavi servers.' \
+            '' \
+            'The snapshot is AES-256-GCM encrypted using a key derived from the repository secret.' \
+            'No plaintext database or credential is committed here.' \
+            '' \
+            'When the on-premises WAN is unavailable, GitHub continues from this snapshot and' \
+            'reconciles its event log with the other Xavi-Sky replicas after connectivity returns.' \
+            > README.md
+          git add README.md github-replica.sqlite.enc
+          git commit -m "Persist Xavi-Sky GitHub replica state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push --force origin HEAD:refs/heads/xavi-sky-state
+
+      - name: Keep public scheduled workflow active
+        if: ${{ always() && github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          NOW=$(date -u +%s)
+          LAST=$(git log -1 --format=%ct)
+          AGE=$((NOW - LAST))
+          if [ "$AGE" -ge 2592000 ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit --allow-empty -m "Keep Xavi-Sky scheduled worker active $(date -u +%Y-%m-%d)"
+            git push origin HEAD:main
+          else
+            echo "Default branch activity is recent; no keepalive commit needed."
+          fi

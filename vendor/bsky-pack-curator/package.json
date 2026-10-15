@@ -1,0 +1,33 @@
+{
+  "name": "bsky-pack-curator",
+  "version": "0.1.0",
+  "description": "Curate and score Bluesky starter packs via the AT Protocol public API. Activity-weighted ranking, network-graph augmentation, saturation scraping, and a ready-to-paste roster. Read-only, no credentials required.",
+  "type": "module",
+  "bin": {
+    "bsky-pack": "bin/bsky-pack.mjs"
+  },
+  "scripts": {
+    "start": "node bin/bsky-pack.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "optionalDependencies": {
+    "puppeteer": "^23.0.0"
+  },
+  "keywords": [
+    "bluesky",
+    "atproto",
+    "starter-pack",
+    "curation",
+    "social-graph"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gyapaganda-a11y/bsky-pack-curator.git"
+  },
+  "author": "Vincent Couey <vinnycouey@gmail.com>"
+}
