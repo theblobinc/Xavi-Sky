@@ -1,5 +1,5 @@
 [Unit]
-Description=Xavi-Sky hourly discovery and federation worker
+Description=Xavi-Sky hourly discovery, following and federation worker
 After=network-online.target
 
 [Service]
@@ -9,6 +9,11 @@ Environment=XAVI_SKY_NODE_ID=xavi-sky-prod4
 Environment=XAVI_SKY_NODE_KIND=server
 Environment=XAVI_SKY_DATA_DIR=/datastore3/xavi-sky/data
 Environment=XAVI_SKY_FEDERATION_TOKEN_FILE=/datastore3/xavi-sky/secrets/federation.token
+Environment=XAVI_SKY_ACCOUNTS_FILE=/datastore3/xavi-sky/secrets/bluesky-accounts.json
+Environment=XAVI_SKY_FOLLOW_ENABLED=1
+Environment=XAVI_SKY_FOLLOW_MAX_PER_ACCOUNT=300
+Environment=XAVI_SKY_FOLLOW_DAILY_MAX_PER_ACCOUNT=6000
+Environment=XAVI_SKY_FOLLOW_WRITE_DELAY_MS=150
 ExecStart=/usr/bin/node /datastore3/xavi-sky/src/worker.mjs
 TimeoutStartSec=infinity
 Nice=5
