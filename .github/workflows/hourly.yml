@@ -16,7 +16,7 @@ permissions:
 jobs:
   worker:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       XAVI_SKY_NODE_ID: github-${{ github.repository_owner }}-xavi-sky
       XAVI_SKY_NODE_KIND: github-actions

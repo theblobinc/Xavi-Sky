@@ -9,8 +9,8 @@ Environment=XAVI_SKY_NODE_ID=xavi-sky-prod4
 Environment=XAVI_SKY_NODE_KIND=server
 Environment=XAVI_SKY_DATA_DIR=/datastore3/xavi-sky/data
 Environment=XAVI_SKY_FEDERATION_TOKEN_FILE=/datastore3/xavi-sky/secrets/federation.token
-ExecStart=/usr/bin/timeout 290 /usr/bin/node /datastore3/xavi-sky/src/worker.mjs
-TimeoutStartSec=295
+ExecStart=/usr/bin/node /datastore3/xavi-sky/src/worker.mjs
+TimeoutStartSec=infinity
 Nice=5
 
 [Install]
