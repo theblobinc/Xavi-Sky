@@ -1,37 +1,61 @@
 # Xavi-Sky
 
-Federated Bluesky starter-pack discovery, ranking, deduplication, and observability.
+Federated Bluesky discovery, ranking, deduplication, and observability.
 
-Each replica owns a local SQLite database. Replicas exchange immutable events and materialize the same candidate, starter-pack, node, run, and per-account state locally. A replica continues working when peers are unavailable and catches up later without copying live SQLite files.
+The live deployment uses an **AWS always-on primary** plus an **opportunistic production-4 replica**. GitHub is source/versioning only and does not run Xavi-Sky automation.
 
-The production Xavi server deploys `concretecms/xavi_sky` at `/xavi-sky`. GitHub Actions and generic VPS workers use the same worker code but do not activate the ConcreteCMS GUI.
+## Runtime topology
 
-## Worker
+### AWS primary
+
+AWS runs `xavi-sky-free-worker` once per hour through EventBridge. The worker:
+
+- performs public Bluesky discovery independently of the on-premises network;
+- persists candidates, immutable outbound events, peer cursors, follower-scan state, and imported-event dedupe markers in DynamoDB;
+- maintains a DynamoDB worker lease so overlapping invocations do not act as multiple primaries;
+- signs federation requests with an AWS-only P-256 private key held in encrypted SSM Parameter Store;
+- pushes AWS-origin events to production-4 when it is reachable;
+- pulls production-4 events back into DynamoDB and resumes from durable cursors after outages.
+
+AWS therefore remains useful if production-4 or the Xavi WAN is unavailable. A failed federation attempt does not stop discovery or discard AWS state.
+
+### production-4 replica
+
+production-4 keeps the full local SQLite/event implementation in `data/xavi-sky.sqlite` and runs its own hourly discovery timer. It can continue serving the ConcreteCMS Xavi-Sky interface and performing local discovery whenever its Internet connection is available.
+
+The public federation routes are exposed by the ConcreteCMS package. They accept the existing local bearer-token authentication and signed requests from the AWS primary. AWS possesses the private signing key; production-4 stores only the corresponding public verification key.
+
+When production-4 returns after an outage, AWS resumes push/pull federation from its durable cursors. Events are deduplicated by immutable `event_id` and `(origin_node, origin_seq)`, while Bluesky actors are deduplicated by DID.
+
+## GitHub
+
+This repository is the public source and version-history location only. There is intentionally no scheduled GitHub Actions worker. Runtime state is not dependent on GitHub.
+
+## Local worker
 
 ```sh
 node src/worker.mjs
 ```
 
-The worker rotates discovery themes, uses the vendored `gyapaganda-a11y/bsky-pack-curator`, discovers public starter-pack URLs, updates its local replica, and synchronizes configured peers before and after discovery.
+The local worker rotates discovery themes, uses the vendored `gyapaganda-a11y/bsky-pack-curator`, discovers public starter-pack URLs, and materializes candidates and immutable events into the local SQLite replica.
 
-## Federation
+## Federation data model
 
-Configure pipe-separated peer roots with `XAVI_SKY_PEERS`. Every node keeps its own `data/xavi-sky.sqlite`. The shared bearer token is supplied using `XAVI_SKY_FEDERATION_TOKEN` or a local token file and is never committed.
+Each runtime keeps durable state appropriate to its environment rather than sharing a live SQLite file over the network:
 
-Events are globally deduplicated by `event_id` and `(origin_node, origin_seq)`. Accounts are deduplicated by Bluesky DID, while account-specific processing state is keyed by `(account_handle, DID)`.
+- production-4: SQLite event log and materialized tables;
+- AWS: DynamoDB event/outbox records, imported-event markers, candidates, peer cursors, and worker lease.
 
-## GitHub Actions and WAN-loss operation
+The federation contract uses immutable event objects containing `event_id`, `origin_node`, `origin_seq`, event/entity types, entity ID, optional account handle, JSON payload, and creation time. Replaying an event is safe because receivers deduplicate by event ID.
 
-`.github/workflows/hourly.yml` runs once per hour with a five-minute job timeout. GitHub is an independent federation replica, not a dependency of the on-premises servers. If the Xavi WAN disappears, the GitHub worker keeps running in GitHub's cloud, continues public discovery using its own Internet connection, records events locally, and attempts federation again on later runs. When `www.xavi.app` becomes reachable, the append-only event logs reconcile and deduplicate automatically.
+## Follower and follow-back discovery
 
-The GitHub replica does **not** rely on Actions cache as authoritative storage. Before every run it restores an AES-256-GCM encrypted SQLite snapshot from the `xavi-sky-state` branch. After every run it checkpoints SQLite, encrypts the database, and force-replaces that branch with a single current snapshot. The public repository therefore never stores the plaintext database or federation credential, and state survives runner replacement and ordinary cache eviction. The state branch is refreshed after each worker run. In addition, scheduled runs create an empty keepalive commit on the default branch whenever its newest commit is 30 days old, preventing GitHub's documented 60-day public-repository inactivity window from being reached during a long on-premises outage.
+The AWS hourly worker also scans public follower pages for the configured Xavi Bluesky accounts. Newly seen followers are deduplicated into a follow-back candidate queue and federated to production-4 as high-priority candidate events. Follower pagination cursors are durable, so repeated hourly runs walk the follower set rather than continually rereading only the first page.
 
-Set the repository secret `XAVI_SKY_FEDERATION_TOKEN` to the same federation token used by the trusted Xavi-Sky replicas. The workflow uses `https://www.xavi.app` as its on-premises peer directly; no peer repository variable is required.
-
-A WAN partition has asymmetric effects by design: GitHub can continue reaching Bluesky and accumulating new discovery state, while on-premises replicas can continue serving and processing their already-local databases but cannot reach Bluesky until an Internet path returns. Neither side discards the other's work; federation catch-up occurs after reconnection.
+The queue is discovery/state automation. Bluesky credentials remain protected on production-4 and are not committed to GitHub or included in federation payloads.
 
 ## Manual follow actions
 
 The production ConcreteCMS SPA can issue an explicit one-at-a-time Bluesky follow after a signed-in Xavi user clicks **Follow** for a candidate. Credentials are read only from `/datastore3/xavi-sky/secrets/bluesky-accounts.json`; they are never committed, federated, or returned by the API.
 
-Copy `bluesky-accounts.example.json` to that protected path and replace the placeholders with Bluesky app-passwords. Successful writes create `app.bsky.graph.follow` records and emit federated `account.state` events keyed by `(account_handle, DID)` so other replicas do not repeat the action.
+Copy `bluesky-accounts.example.json` to that protected path and replace the placeholders with Bluesky app-passwords. Successful writes create `app.bsky.graph.follow` records and emit federated `account.state` events keyed by `(account_handle, DID)` so replicas share action state.
