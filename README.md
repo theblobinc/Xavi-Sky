@@ -1,61 +1,101 @@
 # Xavi-Sky
 
-Federated Bluesky discovery, ranking, deduplication, and observability.
+Xavi-Sky is a local Bluesky discovery and manual-curation tool. It searches public Bluesky data for potentially interesting accounts, ranks and deduplicates them, and presents a review queue in the Xavi SPA.
 
-The live deployment uses an **AWS always-on primary** plus an **opportunistic production-4 replica**. GitHub is source/versioning only and does not run Xavi-Sky automation.
+**Xavi-Sky does not automatically follow accounts.** The scheduled worker contains no Bluesky follow-write code. A follow can only be created from the signed-in SPA after a user presses **Follow** and confirms the action.
 
 ## Runtime topology
 
-### AWS primary
+The live runtime is intentionally simple:
 
-AWS runs `xavi-sky-free-worker` once per hour through EventBridge. The worker:
+- **production-4** runs the hourly discovery/ranking worker and stores state in local SQLite.
+- **ConcreteCMS/Xavi-Sky SPA** provides the authenticated review interface and manual actions.
+- **GitHub** is source/version history only. There is no scheduled GitHub Actions worker.
+- **AWS is not part of Xavi-Sky.**
+- There is no federation service or shared live database.
 
-- performs public Bluesky discovery independently of the on-premises network;
-- persists candidates, immutable outbound events, peer cursors, follower-scan state, and imported-event dedupe markers in DynamoDB;
-- maintains a DynamoDB worker lease so overlapping invocations do not act as multiple primaries;
-- signs federation requests with an AWS-only P-256 private key held in encrypted SSM Parameter Store;
-- pushes AWS-origin events to production-4 when it is reachable;
-- pulls production-4 events back into DynamoDB and resumes from durable cursors after outages.
+## Automated discovery
 
-AWS therefore remains useful if production-4 or the Xavi WAN is unavailable. A failed federation attempt does not stop discovery or discard AWS state.
+`src/worker.mjs` runs once per hour. It only performs discovery and ranking:
 
-### production-4 replica
+1. Rotates through configured themes.
+2. Uses the vendored `gyapaganda-a11y/bsky-pack-curator` pipeline to search public accounts.
+3. Bio-matches the active theme.
+4. Fetches public profile/follower/post signals.
+5. Drops accounts that appear inactive over the configured activity window.
+6. Computes a curator score, score breakdown, and human-readable rationale.
+7. Deduplicates actors by Bluesky DID.
+8. Writes candidates, starter packs, run history, and ranking metadata into local SQLite.
 
-production-4 keeps the full local SQLite/event implementation in `data/xavi-sky.sqlite` and runs its own hourly discovery timer. It can continue serving the ConcreteCMS Xavi-Sky interface and performing local discovery whenever its Internet connection is available.
+The worker has no account password configuration and no `com.atproto.repo.createRecord` path.
 
-The public federation routes are exposed by the ConcreteCMS package. They accept the existing local bearer-token authentication and signed requests from the AWS primary. AWS possesses the private signing key; production-4 stores only the corresponding public verification key.
-
-When production-4 returns after an outage, AWS resumes push/pull federation from its durable cursors. Events are deduplicated by immutable `event_id` and `(origin_node, origin_seq)`, while Bluesky actors are deduplicated by DID.
-
-## GitHub
-
-This repository is the public source and version-history location only. There is intentionally no scheduled GitHub Actions worker. Runtime state is not dependent on GitHub.
-
-## Local worker
+Run it manually with:
 
 ```sh
 node src/worker.mjs
 ```
 
-The local worker rotates discovery themes, uses the vendored `gyapaganda-a11y/bsky-pack-curator`, discovers public starter-pack URLs, and materializes candidates and immutable events into the local SQLite replica.
+The production systemd timer runs it at approximately seven minutes past each hour.
 
-## Federation data model
+## Manual review SPA
 
-Each runtime keeps durable state appropriate to its environment rather than sharing a live SQLite file over the network:
+The ConcreteCMS package is served at `/xavi-sky` and requires a signed-in Xavi user. The review interface includes:
 
-- production-4: SQLite event log and materialized tables;
-- AWS: DynamoDB event/outbox records, imported-event markers, candidates, peer cursors, and worker lease.
+- **Review Queue** — ranked suggestions for the selected Bluesky account.
+- **All Candidates** — broader searchable candidate inventory.
+- **Decisions** — followed, dismissed, snoozed, and queued review state.
+- **Starter Packs** — discovered public starter-pack links.
+- **Diagnostics** — recent local worker/event information.
 
-The federation contract uses immutable event objects containing `event_id`, `origin_node`, `origin_seq`, event/entity types, entity ID, optional account handle, JSON payload, and creation time. Replaying an event is safe because receivers deduplicate by event ID.
+Review controls include:
 
-## Follower and follow-back discovery
+- search by handle, bio, or ranking rationale;
+- theme filtering;
+- minimum follower filtering;
+- sorting by quality score, follower count, activity, or recency;
+- visible rationale, source/theme tags, and score-breakdown signals;
+- **Snooze** to hide an account temporarily;
+- **Dismiss** to keep an account out of the queue;
+- **Return to queue** from the Decisions tab;
+- **Follow** only by an explicit user click followed by a confirmation prompt.
 
-The AWS hourly worker also scans public follower pages for the configured Xavi Bluesky accounts. Newly seen followers are deduplicated into a follow-back candidate queue and federated to production-4 as high-priority candidate events. Follower pagination cursors are durable, so repeated hourly runs walk the follower set rather than continually rereading only the first page.
+Legacy `followback` candidates from the removed cloud automation are excluded from the default review queue.
 
-The queue is discovery/state automation. Bluesky credentials remain protected on production-4 and are not committed to GitHub or included in federation payloads.
+## Manual follow safety boundary
 
-## Manual follow actions
+The only Bluesky follow-write implementation lives in:
 
-The production ConcreteCMS SPA can issue an explicit one-at-a-time Bluesky follow after a signed-in Xavi user clicks **Follow** for a candidate. Credentials are read only from `/datastore3/xavi-sky/secrets/bluesky-accounts.json`; they are never committed, federated, or returned by the API.
+```text
+concretecms/xavi_sky/controller/api/Actions.php
+```
 
-Copy `bluesky-accounts.example.json` to that protected path and replace the placeholders with Bluesky app-passwords. Successful writes create `app.bsky.graph.follow` records and emit federated `account.state` events keyed by `(account_handle, DID)` so replicas share action state.
+The endpoint requires all of the following:
+
+- authenticated Xavi/ConcreteCMS user;
+- valid Xavi-Sky CSRF token;
+- a configured local Bluesky account;
+- a valid target DID;
+- request field `manual: true`;
+- a browser-side confirmation after the user clicks **Follow**.
+
+Credentials remain local in:
+
+```text
+/datastore3/xavi-sky/secrets/bluesky-accounts.json
+```
+
+They are not committed to GitHub and are not used by the hourly discovery worker.
+
+## Data
+
+Primary state:
+
+```text
+/datastore3/xavi-sky/data/xavi-sky.sqlite
+```
+
+Candidate records persist public profile counts, ranking score, curator score, themes, discovery sources, rationale, and score-breakdown JSON. Manual per-account decisions are stored separately in `account_state`, keyed by `(account_handle, DID)`.
+
+## Configuration
+
+See `config.example.env`. The worker configuration contains discovery settings only; there are intentionally no federation or automatic-follow settings.

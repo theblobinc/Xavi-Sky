@@ -121,12 +121,38 @@ class Actions
         $st=$d->prepare("INSERT INTO account_state(account_handle,did,state,detail,last_event_id,last_action_at) VALUES(?,?,?,?,?,?) ON CONFLICT(account_handle,did) DO UPDATE SET state=excluded.state,detail=excluded.detail,last_event_id=excluded.last_event_id,last_action_at=excluded.last_action_at WHERE excluded.last_action_at >= COALESCE(account_state.last_action_at,'')");
         $st->execute([$handle,$did,$state,$detail,$eventId,$at]);
     }
+    public static function review(){
+        $r=Request::createFromGlobals();
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        if(!self::csrfOk($r)) return self::out(['error'=>'csrf'],403);
+        $body=json_decode((string)$r->getContent(),true)?:[];
+        $handle=strtolower(trim((string)($body['accountHandle']??$body['account_handle']??'')));
+        $did=trim((string)($body['did']??''));
+        $action=strtolower(trim((string)($body['action']??'')));
+        if($handle===''||!preg_match('/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/',$did)) return self::out(['error'=>'accountHandle and valid DID required'],400);
+        $accounts=self::accountsRaw(); if(!isset($accounts[$handle])) return self::out(['error'=>'Bluesky account not configured'],409);
+        $at=(new \DateTimeImmutable('now',new \DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.v\Z');
+        $state=''; $detail='';
+        if($action==='dismiss'){ $state='dismissed'; $detail='manual'; }
+        elseif($action==='snooze'){
+            $days=max(1,min(90,(int)($body['days']??7)));
+            $until=(new \DateTimeImmutable('now',new \DateTimeZone('UTC')))->modify('+'.$days.' days');
+            $state='snoozed'; $detail=$until->format('Y-m-d\TH:i:s.v\Z');
+        }
+        elseif($action==='queue'||$action==='restore'){ $state='queued'; $detail=''; }
+        else return self::out(['error'=>'action must be dismiss, snooze, or queue'],400);
+        try{
+            $d=self::db(); self::emitAccountState($d,$handle,$did,$state,$detail,$at);
+            return self::out(['ok'=>true,'accountHandle'=>$handle,'did'=>$did,'state'=>$state,'detail'=>$detail]);
+        }catch(\Throwable $e){ return self::out(['error'=>$e->getMessage()],500); }
+    }
     public static function follow(){
         $r=Request::createFromGlobals();
         if(!self::registered()) return self::out(['error'=>'auth'],401);
         if(!self::csrfOk($r)) return self::out(['error'=>'csrf'],403);
-        $body=json_decode((string)$r->getContent(),true);
-        $handle=strtolower(trim((string)($body['accountHandle']??''))); $did=trim((string)($body['did']??''));
+        $body=json_decode((string)$r->getContent(),true)?:[];
+        if(($body['manual']??false)!==true) return self::out(['error'=>'manual confirmation required'],409);
+        $handle=strtolower(trim((string)($body['accountHandle']??$body['account_handle']??''))); $did=trim((string)($body['did']??''));
         if($handle===''||!preg_match('/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/',$did)) return self::out(['error'=>'accountHandle and valid DID required'],400);
         $accounts=self::accountsRaw(); if(!isset($accounts[$handle])) return self::out(['error'=>'Bluesky account not configured'],409);
         try{

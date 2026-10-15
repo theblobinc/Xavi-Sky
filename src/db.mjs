@@ -35,6 +35,7 @@ export function openDb() {
       followers_count INTEGER, follows_count INTEGER, posts_count INTEGER,
       score REAL NOT NULL DEFAULT 0, curator_score REAL NOT NULL DEFAULT 0,
       themes_json TEXT NOT NULL DEFAULT '[]', sources_json TEXT NOT NULL DEFAULT '[]',
+      rationale TEXT NOT NULL DEFAULT '', score_breakdown_json TEXT NOT NULL DEFAULT '{}',
       first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS starter_packs(
@@ -61,6 +62,9 @@ export function openDb() {
       last_pull_at TEXT, last_push_at TEXT, last_error TEXT NOT NULL DEFAULT ''
     );
   `);
+  const candidateCols=new Set(db.prepare('PRAGMA table_info(candidates)').all().map(r=>String(r.name)));
+  if(!candidateCols.has('rationale')) db.exec("ALTER TABLE candidates ADD COLUMN rationale TEXT NOT NULL DEFAULT ''");
+  if(!candidateCols.has('score_breakdown_json')) db.exec("ALTER TABLE candidates ADD COLUMN score_breakdown_json TEXT NOT NULL DEFAULT '{}'");
   ensureNode();
   return db;
 }
@@ -114,13 +118,18 @@ function applyEvent(e,d=openDb()) {
     const old=d.prepare('SELECT * FROM candidates WHERE did=?').get(e.entity_id);
     const themes=[...new Set([...(p(old?.themes_json,'[]')||[]),...(payload.themes||[])])];
     const sources=[...new Set([...(p(old?.sources_json,'[]')||[]),...(payload.sources||[])])];
-    d.prepare(`INSERT INTO candidates(did,handle,display_name,description,followers_count,follows_count,posts_count,score,curator_score,themes_json,sources_json,first_seen_at,last_seen_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(did) DO UPDATE SET
+    const rationale=String(payload.rationale||old?.rationale||'');
+    const scoreBreakdown=payload.scoreBreakdown ?? p(old?.score_breakdown_json,'{}') ?? {};
+    d.prepare(`INSERT INTO candidates(did,handle,display_name,description,followers_count,follows_count,posts_count,score,curator_score,themes_json,sources_json,rationale,score_breakdown_json,first_seen_at,last_seen_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(did) DO UPDATE SET
       handle=excluded.handle,display_name=excluded.display_name,description=excluded.description,
       followers_count=COALESCE(excluded.followers_count,candidates.followers_count),follows_count=COALESCE(excluded.follows_count,candidates.follows_count),
       posts_count=COALESCE(excluded.posts_count,candidates.posts_count),score=MAX(candidates.score,excluded.score),curator_score=MAX(candidates.curator_score,excluded.curator_score),
-      themes_json=excluded.themes_json,sources_json=excluded.sources_json,last_seen_at=MAX(candidates.last_seen_at,excluded.last_seen_at)`)
-      .run(e.entity_id,payload.handle||old?.handle||'',payload.displayName||old?.display_name||'',payload.description||old?.description||'',payload.followersCount??null,payload.followsCount??null,payload.postsCount??null,Number(payload.score||0),Number(payload.curatorScore||0),j(themes),j(sources),old?.first_seen_at||ts,ts);
+      themes_json=excluded.themes_json,sources_json=excluded.sources_json,
+      rationale=CASE WHEN excluded.rationale<>'' THEN excluded.rationale ELSE candidates.rationale END,
+      score_breakdown_json=CASE WHEN excluded.score_breakdown_json<>'{}' THEN excluded.score_breakdown_json ELSE candidates.score_breakdown_json END,
+      last_seen_at=MAX(candidates.last_seen_at,excluded.last_seen_at)`)
+      .run(e.entity_id,payload.handle||old?.handle||'',payload.displayName||old?.display_name||'',payload.description||old?.description||'',payload.followersCount??null,payload.followsCount??null,payload.postsCount??null,Number(payload.score||0),Number(payload.curatorScore||0),j(themes),j(sources),rationale,j(scoreBreakdown),old?.first_seen_at||ts,ts);
   } else if (t==='starter_pack.upsert') {
     const old=d.prepare('SELECT * FROM starter_packs WHERE url=?').get(e.entity_id);
     const themes=[...new Set([...(p(old?.themes_json,'[]')||[]),...(payload.themes||[])])];
@@ -158,9 +167,9 @@ export function finishRun(run,status,snapshot,error='') {
   const payload={startedAt:run.startedAt,finishedAt:now(),status,theme:snapshot?.theme||'',candidatesSeen:snapshot?.candidateCount||0,packsSeen:snapshot?.starterPackCount||0,error:String(error||'')};
   emitEvent('run.finished','run',run.runId,payload);
 }
-export function heartbeat(version='0.1.0') { emitEvent('node.heartbeat','node',NODE_ID,{nodeKind:NODE_KIND,label:NODE_ID,version,capabilities:['discovery','ranking','sqlite-replica','federation']}); }
+export function heartbeat(version='0.1.0') { emitEvent('node.heartbeat','node',NODE_ID,{nodeKind:NODE_KIND,label:NODE_ID,version,capabilities:['discovery','ranking','sqlite','manual-curation']}); }
 
-function ensureNode(){ upsertNode(NODE_ID,NODE_KIND,NODE_ID,'0.1.0',['discovery','ranking','sqlite-replica','federation'],now(),db); }
+function ensureNode(){ upsertNode(NODE_ID,NODE_KIND,NODE_ID,'0.1.0',['discovery','ranking','sqlite','manual-curation'],now(),db); }
 function upsertNode(id,kind,label,version,caps,ts,d=openDb()){
   d.prepare(`INSERT INTO nodes(node_id,node_kind,label,version,first_seen_at,last_seen_at,capabilities_json) VALUES(?,?,?,?,?,?,?)
   ON CONFLICT(node_id) DO UPDATE SET node_kind=excluded.node_kind,label=excluded.label,version=excluded.version,last_seen_at=MAX(nodes.last_seen_at,excluded.last_seen_at),capabilities_json=excluded.capabilities_json`)

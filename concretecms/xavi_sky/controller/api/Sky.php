@@ -1,26 +1,132 @@
 <?php
 namespace Concrete\Package\XaviSky\Controller\Api;
 defined('C5_EXECUTE') or die('Access Denied.');
+
 use Concrete\Core\User\User;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
-class Sky {
- const DB='/datastore3/xavi-sky/data/xavi-sky.sqlite';
- const TOKEN='/datastore3/xavi-sky/secrets/federation.token';
- static function out($x,$s=200){return new JsonResponse($x,$s,['Cache-Control'=>'no-store']);}
- static function db(){ $d=new \PDO('sqlite:'.self::DB);$d->setAttribute(\PDO::ATTR_ERRMODE,\PDO::ERRMODE_EXCEPTION);$d->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE,\PDO::FETCH_ASSOC);$d->exec('PRAGMA busy_timeout=5000');return $d; }
- static function readAuth(){ $u=new User(); return $u->isRegistered()||self::fedAuth(); }
- static function fedAuth(){ $h=(string)($_SERVER['HTTP_AUTHORIZATION']??getenv('HTTP_AUTHORIZATION')?:''); $x=trim((string)($_SERVER['HTTP_X_XAVI_SKY_TOKEN']??'')); $c=trim((string)($_COOKIE['xavi_sky_federation']??'')); $p=stripos($h,'Bearer ')===0?trim(substr($h,7)):($x!==''?$x:$c); $e=is_readable(self::TOKEN)?trim((string)file_get_contents(self::TOKEN)):''; return $p!==''&&$e!==''&&hash_equals($e,$p); }
- static function status(){ if(!self::readAuth())return self::out(['error'=>'auth'],401);try{$d=self::db();$one=function($sql)use($d){return(int)$d->query($sql)->fetchColumn();};$run=$d->query("SELECT * FROM runs ORDER BY COALESCE(finished_at,started_at) DESC LIMIT 1")->fetch()?:null;return self::out(['ok'=>true,'candidateCount'=>$one('SELECT COUNT(*) FROM candidates'),'starterPackCount'=>$one('SELECT COUNT(*) FROM starter_packs'),'eventCount'=>$one('SELECT COUNT(*) FROM events'),'nodeCount'=>$one('SELECT COUNT(*) FROM nodes'),'accountStateCount'=>$one('SELECT COUNT(*) FROM account_state'),'lastRun'=>$run,'db'=>self::DB]);}catch(\Throwable $e){return self::out(['error'=>$e->getMessage()],500);} }
- static function nodes(){if(!self::readAuth())return self::out(['error'=>'auth'],401);$d=self::db();return self::out(['nodes'=>$d->query("SELECT n.*, (SELECT COUNT(*) FROM events e WHERE e.origin_node=n.node_id) event_count FROM nodes n ORDER BY last_seen_at DESC")->fetchAll(),'peers'=>$d->query('SELECT * FROM peer_cursors ORDER BY peer_id')->fetchAll()]);}
- static function events(){if(!self::readAuth())return self::out(['error'=>'auth'],401);$r=Request::createFromGlobals();$limit=max(1,min(500,(int)$r->query->get('limit',120)));$d=self::db();$st=$d->prepare('SELECT ingest_seq,event_id,origin_node,event_type,entity_type,entity_id,account_handle,payload_json,created_at FROM events ORDER BY ingest_seq DESC LIMIT ?');$st->bindValue(1,$limit,\PDO::PARAM_INT);$st->execute();return self::out(['events'=>$st->fetchAll()]);}
- static function candidates(){if(!self::readAuth())return self::out(['error'=>'auth'],401);$r=Request::createFromGlobals();$limit=max(1,min(1000,(int)$r->query->get('limit',250)));$q=trim((string)$r->query->get('q',''));$d=self::db();if($q!==''){$st=$d->prepare('SELECT c.*, (SELECT json_group_object(account_handle,state) FROM account_state a WHERE a.did=c.did) account_states FROM candidates c WHERE handle LIKE :q OR display_name LIKE :q OR description LIKE :q ORDER BY score DESC LIMIT :lim');$st->bindValue(':q','%'.$q.'%');$st->bindValue(':lim',$limit,\PDO::PARAM_INT);$st->execute();}else{$st=$d->prepare('SELECT c.*, (SELECT json_group_object(account_handle,state) FROM account_state a WHERE a.did=c.did) account_states FROM candidates c ORDER BY score DESC LIMIT ?');$st->bindValue(1,$limit,\PDO::PARAM_INT);$st->execute();}return self::out(['candidates'=>$st->fetchAll()]);}
- static function starterPacks(){if(!self::readAuth())return self::out(['error'=>'auth'],401);$d=self::db();return self::out(['starterPacks'=>$d->query('SELECT * FROM starter_packs ORDER BY last_seen_at DESC LIMIT 500')->fetchAll()]);}
- static function federationPull(){if(!self::fedAuth())return self::out(['error'=>'auth'],401);$r=Request::createFromGlobals();$after=max(0,(int)$r->query->get('after',0));$limit=max(1,min(2000,(int)$r->query->get('limit',500)));$d=self::db();$st=$d->prepare('SELECT ingest_seq,event_id,origin_node,origin_seq,event_type,entity_type,entity_id,account_handle,payload_json,created_at FROM events WHERE ingest_seq>? ORDER BY ingest_seq ASC LIMIT ?');$st->bindValue(1,$after,\PDO::PARAM_INT);$st->bindValue(2,$limit,\PDO::PARAM_INT);$st->execute();$rows=$st->fetchAll();$next=$rows?(int)$rows[count($rows)-1]['ingest_seq']:$after;foreach($rows as &$x)unset($x['ingest_seq']);return self::out(['events'=>$rows,'nextCursor'=>$next]);}
- static function federationPush(){if(!self::fedAuth())return self::out(['error'=>'auth'],401);$data=json_decode((string)file_get_contents('php://input'),true)?:[];$events=is_array($data['events']??null)?$data['events']:[];$d=self::db();$accepted=0;$d->beginTransaction();try{$ins=$d->prepare('INSERT OR IGNORE INTO events(event_id,origin_node,origin_seq,event_type,entity_type,entity_id,account_handle,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)');foreach($events as $e){if(empty($e['event_id'])||empty($e['origin_node']))continue;$pj=is_string($e['payload_json']??null)?$e['payload_json']:json_encode($e['payload_json']??[],JSON_UNESCAPED_SLASHES);$ins->execute([$e['event_id'],$e['origin_node'],(int)($e['origin_seq']??0),(string)($e['event_type']??''),(string)($e['entity_type']??''),(string)($e['entity_id']??''),$e['account_handle']??null,$pj,(string)($e['created_at']??gmdate('c'))]);if($ins->rowCount()>0){self::apply($d,$e,$pj);$accepted++;}}$d->commit();return self::out(['ok'=>true,'accepted'=>$accepted]);}catch(\Throwable $e){if($d->inTransaction())$d->rollBack();return self::out(['error'=>$e->getMessage()],500);} }
- static function apply($d,$e,$pj){$p=json_decode($pj,true)?:[];$t=$e['event_type']??'';$id=(string)($e['entity_id']??'');$ts=(string)($e['created_at']??gmdate('c'));if($t==='candidate.upsert'){ $old=$d->prepare('SELECT * FROM candidates WHERE did=?');$old->execute([$id]);$o=$old->fetch()?:[];$themes=array_values(array_unique(array_merge(json_decode($o['themes_json']??'[]',true)?:[],$p['themes']??[])));$sources=array_values(array_unique(array_merge(json_decode($o['sources_json']??'[]',true)?:[],$p['sources']??[])));$st=$d->prepare("INSERT INTO candidates(did,handle,display_name,description,followers_count,follows_count,posts_count,score,curator_score,themes_json,sources_json,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(did) DO UPDATE SET handle=excluded.handle,display_name=excluded.display_name,description=excluded.description,followers_count=COALESCE(excluded.followers_count,candidates.followers_count),follows_count=COALESCE(excluded.follows_count,candidates.follows_count),posts_count=COALESCE(excluded.posts_count,candidates.posts_count),score=MAX(candidates.score,excluded.score),curator_score=MAX(candidates.curator_score,excluded.curator_score),themes_json=excluded.themes_json,sources_json=excluded.sources_json,last_seen_at=MAX(candidates.last_seen_at,excluded.last_seen_at)");$st->execute([$id,$p['handle']??($o['handle']??''),$p['displayName']??($o['display_name']??''),$p['description']??($o['description']??''),$p['followersCount']??null,$p['followsCount']??null,$p['postsCount']??null,(float)($p['score']??0),(float)($p['curatorScore']??0),json_encode($themes),json_encode($sources),$o['first_seen_at']??$ts,$ts]);}
- else if($t==='starter_pack.upsert'){ $old=$d->prepare('SELECT * FROM starter_packs WHERE url=?');$old->execute([$id]);$o=$old->fetch()?:[];$themes=array_values(array_unique(array_merge(json_decode($o['themes_json']??'[]',true)?:[],$p['themes']??[])));$st=$d->prepare('INSERT INTO starter_packs(url,themes_json,first_seen_at,last_seen_at) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET themes_json=excluded.themes_json,last_seen_at=MAX(starter_packs.last_seen_at,excluded.last_seen_at)');$st->execute([$id,json_encode($themes),$o['first_seen_at']??($p['firstSeenAt']??$ts),$p['lastSeenAt']??$ts]);}
- else if($t==='account.state'){ $a=(string)($e['account_handle']??($p['accountHandle']??''));$st=$d->prepare('INSERT INTO account_state(account_handle,did,state,detail,last_event_id,last_action_at) VALUES(?,?,?,?,?,?) ON CONFLICT(account_handle,did) DO UPDATE SET state=excluded.state,detail=excluded.detail,last_event_id=excluded.last_event_id,last_action_at=excluded.last_action_at WHERE excluded.last_action_at >= COALESCE(account_state.last_action_at,\'\')');$st->execute([$a,$id,$p['state']??'seen',$p['detail']??'',$e['event_id'],$p['at']??$ts]);}
- else if($t==='node.heartbeat'){ $st=$d->prepare('INSERT INTO nodes(node_id,node_kind,label,version,first_seen_at,last_seen_at,capabilities_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET node_kind=excluded.node_kind,label=excluded.label,version=excluded.version,last_seen_at=MAX(nodes.last_seen_at,excluded.last_seen_at),capabilities_json=excluded.capabilities_json');$st->execute([$e['origin_node'],$p['nodeKind']??'worker',$p['label']??$e['origin_node'],$p['version']??'',$ts,$ts,json_encode($p['capabilities']??[])]);}
- else if($t==='run.finished'){ $st=$d->prepare('INSERT INTO runs(run_id,node_id,started_at,finished_at,status,theme,candidates_seen,packs_seen,error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,theme=excluded.theme,candidates_seen=excluded.candidates_seen,packs_seen=excluded.packs_seen,error=excluded.error');$st->execute([$id,$e['origin_node'],$p['startedAt']??$ts,$p['finishedAt']??$ts,$p['status']??'ok',$p['theme']??'',(int)($p['candidatesSeen']??0),(int)($p['packsSeen']??0),$p['error']??'']);} }
+
+class Sky
+{
+    const DB='/datastore3/xavi-sky/data/xavi-sky.sqlite';
+
+    private static function out($x,$s=200){ return new JsonResponse($x,$s,['Cache-Control'=>'no-store']); }
+    private static function registered(){ $u=new User(); return $u->isRegistered(); }
+    private static function db(){
+        $d=new \PDO('sqlite:'.self::DB);
+        $d->setAttribute(\PDO::ATTR_ERRMODE,\PDO::ERRMODE_EXCEPTION);
+        $d->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE,\PDO::FETCH_ASSOC);
+        $d->exec('PRAGMA busy_timeout=5000');
+        return $d;
+    }
+
+    public static function status(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        try{
+            $d=self::db();
+            $one=function($sql)use($d){ return (int)$d->query($sql)->fetchColumn(); };
+            $run=$d->query("SELECT * FROM runs ORDER BY COALESCE(finished_at,started_at) DESC LIMIT 1")->fetch()?:null;
+            return self::out([
+                'ok'=>true,
+                'mode'=>'discovery-only',
+                'manualFollowOnly'=>true,
+                'candidateCount'=>$one('SELECT COUNT(*) FROM candidates'),
+                'starterPackCount'=>$one('SELECT COUNT(*) FROM starter_packs'),
+                'eventCount'=>$one('SELECT COUNT(*) FROM events'),
+                'nodeCount'=>$one('SELECT COUNT(*) FROM nodes'),
+                'accountStateCount'=>$one('SELECT COUNT(*) FROM account_state'),
+                'followedCount'=>$one("SELECT COUNT(*) FROM account_state WHERE state='followed'"),
+                'dismissedCount'=>$one("SELECT COUNT(*) FROM account_state WHERE state='dismissed'"),
+                'snoozedCount'=>$one("SELECT COUNT(*) FROM account_state WHERE state='snoozed' AND detail>strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
+                'lastRun'=>$run,
+                'db'=>self::DB,
+            ]);
+        }catch(\Throwable $e){ return self::out(['error'=>$e->getMessage()],500); }
+    }
+
+    public static function nodes(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $d=self::db();
+        return self::out(['nodes'=>$d->query("SELECT n.*, (SELECT COUNT(*) FROM events e WHERE e.origin_node=n.node_id) event_count FROM nodes n ORDER BY last_seen_at DESC")->fetchAll()]);
+    }
+
+    public static function events(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $r=Request::createFromGlobals();
+        $limit=max(1,min(500,(int)$r->query->get('limit',120)));
+        $d=self::db();
+        $st=$d->prepare('SELECT ingest_seq,event_id,origin_node,event_type,entity_type,entity_id,account_handle,payload_json,created_at FROM events ORDER BY ingest_seq DESC LIMIT ?');
+        $st->bindValue(1,$limit,\PDO::PARAM_INT); $st->execute();
+        return self::out(['events'=>$st->fetchAll()]);
+    }
+
+    public static function candidates(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $r=Request::createFromGlobals();
+        $limit=max(1,min(1000,(int)$r->query->get('limit',400)));
+        $q=trim((string)$r->query->get('q',''));
+        $sort=(string)$r->query->get('sort','score');
+        $order=$sort==='followers'?'COALESCE(c.followers_count,0) DESC,c.score DESC':($sort==='recent'?'c.last_seen_at DESC,c.score DESC':'c.score DESC,COALESCE(c.followers_count,0) DESC');
+        $d=self::db();
+        $sql="SELECT c.*, (SELECT json_group_object(account_handle,state) FROM account_state a WHERE a.did=c.did) account_states FROM candidates c";
+        $params=[];
+        if($q!==''){ $sql.=' WHERE c.handle LIKE :q OR c.display_name LIKE :q OR c.description LIKE :q OR COALESCE(c.rationale,\'\') LIKE :q'; $params[':q']='%'.$q.'%'; }
+        $sql.=' ORDER BY '.$order.' LIMIT :lim';
+        $st=$d->prepare($sql);
+        foreach($params as $k=>$v) $st->bindValue($k,$v,\PDO::PARAM_STR);
+        $st->bindValue(':lim',$limit,\PDO::PARAM_INT); $st->execute();
+        return self::out(['candidates'=>$st->fetchAll(),'limit'=>$limit,'sort'=>$sort]);
+    }
+
+    public static function starterPacks(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $d=self::db();
+        return self::out(['starterPacks'=>$d->query('SELECT * FROM starter_packs ORDER BY last_seen_at DESC LIMIT 500')->fetchAll()]);
+    }
+
+    public static function followQueue(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $r=Request::createFromGlobals();
+        $account=strtolower(trim((string)$r->query->get('account','')));
+        if($account==='') return self::out(['error'=>'account required'],400);
+        $limit=max(1,min(250,(int)$r->query->get('limit',100)));
+        $q=trim((string)$r->query->get('q',''));
+        $theme=trim((string)$r->query->get('theme',''));
+        $minFollowers=max(0,min(100000000,(int)$r->query->get('minFollowers',0)));
+        $sort=(string)$r->query->get('sort','score');
+        $order=$sort==='followers'?'COALESCE(c.followers_count,0) DESC,c.score DESC':($sort==='recent'?'c.last_seen_at DESC,c.score DESC':($sort==='activity'?'COALESCE(c.posts_count,0) DESC,c.score DESC':'c.score DESC,COALESCE(c.followers_count,0) DESC'));
+        $now=(new \DateTimeImmutable('now',new \DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.v\Z');
+        $d=self::db();
+        $sql="SELECT c.*, a.state account_state,a.detail account_detail,a.last_action_at account_last_action
+              FROM candidates c
+              LEFT JOIN account_state a ON a.did=c.did AND a.account_handle=:account
+              WHERE (a.state IS NULL OR (a.state NOT IN ('followed','dismissed') AND NOT (a.state='snoozed' AND a.detail>:now)))
+                AND COALESCE(c.followers_count,0)>=:minFollowers
+                AND c.themes_json NOT LIKE '%\"followback\"%'";
+        if($q!=='') $sql.=" AND (c.handle LIKE :q OR c.display_name LIKE :q OR c.description LIKE :q OR COALESCE(c.rationale,'') LIKE :q)";
+        if($theme!=='') $sql.=" AND c.themes_json LIKE :theme";
+        $sql.=' ORDER BY '.$order.' LIMIT :lim';
+        $st=$d->prepare($sql);
+        $st->bindValue(':account',$account,\PDO::PARAM_STR);
+        $st->bindValue(':now',$now,\PDO::PARAM_STR);
+        $st->bindValue(':minFollowers',$minFollowers,\PDO::PARAM_INT);
+        if($q!=='') $st->bindValue(':q','%'.$q.'%',\PDO::PARAM_STR);
+        if($theme!=='') $st->bindValue(':theme','%"'.$theme.'"%',\PDO::PARAM_STR);
+        $st->bindValue(':lim',$limit,\PDO::PARAM_INT); $st->execute();
+        return self::out(['account'=>$account,'queue'=>$st->fetchAll(),'limit'=>$limit,'q'=>$q,'theme'=>$theme,'minFollowers'=>$minFollowers,'sort'=>$sort]);
+    }
+
+    public static function reviewHistory(){
+        if(!self::registered()) return self::out(['error'=>'auth'],401);
+        $r=Request::createFromGlobals();
+        $account=strtolower(trim((string)$r->query->get('account','')));
+        if($account==='') return self::out(['error'=>'account required'],400);
+        $limit=max(1,min(500,(int)$r->query->get('limit',200)));
+        $d=self::db();
+        $st=$d->prepare("SELECT a.account_handle,a.did,a.state,a.detail,a.last_action_at,c.handle,c.display_name,c.description,c.followers_count,c.posts_count,c.score,c.themes_json,c.sources_json,c.rationale,c.score_breakdown_json
+                         FROM account_state a LEFT JOIN candidates c ON c.did=a.did
+                         WHERE a.account_handle=? ORDER BY COALESCE(a.last_action_at,'') DESC LIMIT ?");
+        $st->bindValue(1,$account,\PDO::PARAM_STR); $st->bindValue(2,$limit,\PDO::PARAM_INT); $st->execute();
+        return self::out(['account'=>$account,'history'=>$st->fetchAll(),'limit'=>$limit]);
+    }
 }
