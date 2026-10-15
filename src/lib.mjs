@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 
 export const PUBLIC_API = process.env.PUBLIC_BSKY_API || 'https://public.api.bsky.app';
-export const ENTRYWAY = process.env.BSKY_ENTRYWAY || 'https://bsky.social';
 export const TIMEOUT_MS = num('XAVI_SKY_HTTP_TIMEOUT_MS', 10000, 1000, 30000);
 
 export function num(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -28,29 +27,9 @@ export async function xrpcGet(method, params = {}, base = PUBLIC_API) {
   return data;
 }
 
-export async function xrpcPost(method, body, jwt, base = ENTRYWAY) {
-  const response = await fetchTimed(`${base}/xrpc/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json', ...(jwt ? { authorization: `Bearer ${jwt}` } : {}) },
-    body: JSON.stringify(body),
-  });
-  const data = await jsonResponse(response);
-  if (!response.ok) throw httpError(response, data);
-  return data;
-}
-
 export async function resolveHandle(handle) {
   if (String(handle).startsWith('did:')) return handle;
   return (await xrpcGet('com.atproto.identity.resolveHandle', { handle }))?.did || null;
-}
-
-export async function login(handle, password) {
-  const response = await fetchTimed(`${ENTRYWAY}/xrpc/com.atproto.server.createSession`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ identifier: handle, password }),
-  });
-  const data = await jsonResponse(response);
-  if (!response.ok) throw httpError(response, data);
-  return data;
 }
 
 export function parseStarterPackUrl(raw) {
